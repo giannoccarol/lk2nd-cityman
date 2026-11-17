@@ -7,6 +7,7 @@
 #include "lk_panel_ili9806e_boyi_byt45mp41t1m_4p5cpt.h"
 #include "lk_panel_ili9881c_hd_video.h"
 #include "lk_panel_r69431_720p_video.h"
+#include "lk_panel_sergej_wqhd_dualdsi_cmd.h"
 
 int oem_panel_select(const char *panel_name, struct panel_struct *panel,
 		     struct msm_panel_info *pinfo, struct mdss_dsi_phy_ctrl *phy_db);
