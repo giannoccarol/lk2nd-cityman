@@ -42,6 +42,7 @@
 #include <scm.h>
 #include <endian.h>
 #include <regulator.h>
+#include <rpm-ipc.h>
 #include <qtimer.h>
 #include <arch/defines.h>
 #include <platform/gpio.h>
@@ -360,6 +361,11 @@ int target_backlight_ctrl(struct backlight *bl, uint8_t enable)
 		mdelay(20);
 		ret = msm8994_pwm_backlight_ctrl(enable);
 		break;
+#if LK2ND_PANEL_SERGEJ
+	case BL_DCS:
+		/* Brightness is set by the panel on commands (DCS 0x51). */
+		break;
+#endif
 	default:
 		dprintf(CRITICAL, "backlight type:%d not supported\n",
 						bl->bl_interface_type);
@@ -482,7 +488,7 @@ int target_panel_reset(uint8_t enable, struct panel_reset_sequence *resetseq,
 	return NO_ERROR;
 }
 
-static void wled_init(struct msm_panel_info *pinfo)
+static void __UNUSED wled_init(struct msm_panel_info *pinfo)
 {
 	struct qpnp_wled_config_data config = {0};
 	struct labibb_desc *labibb;
@@ -538,6 +544,53 @@ static void wled_init(struct msm_panel_info *pinfo)
 	qpnp_wled_init(&config);
 }
 
+#if LK2ND_PANEL_SERGEJ
+/*
+ * Lumia 950 XL (cityman), Sergej AMOLED. The UEFI leaves the PMI8994 LAB/IBB in
+ * AMOLED mode with SWIRE ready (IBB 0xdc46 = 0x40, LAB 0xde49 = 0x80), the same
+ * state Android keeps with the screen on: the panel switches ELVDD/ELVSS on by
+ * itself once it leaves reset. So no PMIC writes here, unlike the MTP code below
+ * (WLED/IBB set up for an LCD and PM8994 GPIO 14 as the LCD boost enable).
+ * DSI rails as in the kernel: L2 1.25 V, L12 1.8 V, L14 1.8 V, L28 1.0 V.
+ * They stay on when LK turns the panel off: the kernel takes them over.
+ */
+#define SERGEJ_TE_GPIO 10
+
+/*
+ * The UEFI also switches off two rails that the cityman kernel keeps always on
+ * (mmo/common/regulator.dtsi): L22 3.0 V (touch, panel module) and L18 2.85 V.
+ * The panel stays dark without them. Same voltages as the kernel.
+ */
+static uint32_t sergej_ldo18[] = {
+	LDOA_RES_TYPE, 18,
+	KEY_SOFTWARE_ENABLE, 4, GENERIC_ENABLE,
+	KEY_MICRO_VOLT, 4, 2850000,
+	KEY_CURRENT, 4, 40,
+};
+
+static uint32_t sergej_ldo22[] = {
+	LDOA_RES_TYPE, 22,
+	KEY_SOFTWARE_ENABLE, 4, GENERIC_ENABLE,
+	KEY_MICRO_VOLT, 4, 3000000,
+	KEY_CURRENT, 4, 100,
+};
+
+int target_ldo_ctrl(uint8_t enable, struct msm_panel_info *pinfo)
+{
+	if (enable) {
+		rpm_send_data(sergej_ldo18, 36, RPM_REQUEST_TYPE);
+		rpm_send_data(sergej_ldo22, 36, RPM_REQUEST_TYPE);
+		regulator_enable(REG_LDO2 | REG_LDO12 |
+			REG_LDO14 | REG_LDO28);
+		mdelay(20);
+		/* TE input: function 1 (mdp_vsync), pull down, as pmx_mdss_te */
+		gpio_tlmm_config(SERGEJ_TE_GPIO, 1, GPIO_INPUT, GPIO_PULL_DOWN,
+				 GPIO_8MA, GPIO_DISABLE);
+	}
+
+	return NO_ERROR;
+}
+#else
 int target_ldo_ctrl(uint8_t enable, struct msm_panel_info *pinfo)
 {
 	if (enable) {
@@ -560,6 +613,7 @@ int target_ldo_ctrl(uint8_t enable, struct msm_panel_info *pinfo)
 
 	return NO_ERROR;
 }
+#endif
 
 int target_display_pre_on(void)
 {
@@ -652,7 +706,16 @@ void target_display_init(const char *panel_name)
 
 	if (gcdb_display_init(oem.panel, MDP_REV_50, (void *)MIPI_FB_ADDR)) {
 		target_force_cont_splash_disable(true);
+#if LK2ND_PANEL_SERGEJ
+		/*
+		 * A failed step leaves the MDSS clocks off: msm_display_off() would
+		 * then hang the bus and reset the phone on every boot. Keep fastboot
+		 * usable without a screen instead.
+		 */
+		dprintf(CRITICAL, "Display init failed, continuing without display\n");
+#else
 		msm_display_off();
+#endif
 	}
 
 	if (!oem.cont_splash) {
